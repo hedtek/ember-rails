@@ -7,10 +7,15 @@
 /*globals Em:true ENV */
 
 if ('undefined' === typeof Ember) {
+  // Create core object. Make it act like an instance of Ember.Namespace so that
+  // objects assigned to it are given a sane string representation.
+  Ember = {};
+}
+
 /**
   @namespace
   @name Ember
-  @version 0.9.8.1
+  @version 1.0.pre
 
   All Ember methods and functions are defined inside of this namespace.
   You generally should not add new properties to this namespace as it may be
@@ -28,15 +33,9 @@ if ('undefined' === typeof Ember) {
   performance optimizations.
 */
 
-// Create core object. Make it act like an instance of Ember.Namespace so that
-// objects assigned to it are given a sane string representation.
-Ember = {};
-
 // aliases needed to keep minifiers from removing the global context
 if ('undefined' !== typeof window) {
   window.Em = window.Ember = Em = Ember;
-}
-
 }
 
 // Make sure these are set whether Ember was already defined or not
@@ -49,10 +48,10 @@ Ember.toString = function() { return "Ember"; };
 /**
   @static
   @type String
-  @default '0.9.8.1'
+  @default '1.0.pre'
   @constant
 */
-Ember.VERSION = '0.9.8.1';
+Ember.VERSION = '1.0.pre';
 
 /**
   @static
@@ -65,6 +64,7 @@ Ember.VERSION = '0.9.8.1';
 */
 Ember.ENV = 'undefined' === typeof ENV ? {} : ENV;
 
+Ember.config = Ember.config || {};
 
 // ..........................................................
 // BOOTSTRAP
@@ -279,7 +279,7 @@ Ember.ArrayPolyfills = {
   indexOf: arrayIndexOf
 };
 
-Ember.EnumerableUtils = {
+var utils = Ember.EnumerableUtils = {
   map: function(obj, callback, thisArg) {
     return obj.map ? obj.map.call(obj, callback, thisArg) : arrayMap.call(obj, callback, thisArg);
   },
@@ -293,13 +293,13 @@ Ember.EnumerableUtils = {
   },
 
   indexesOf: function(obj, elements) {
-    return elements === undefined ? [] : Ember.EnumerableUtils.map(elements, function(item) {
-      return Ember.EnumerableUtils.indexOf(obj, item);
+    return elements === undefined ? [] : utils.map(elements, function(item) {
+      return utils.indexOf(obj, item);
     });
   },
 
   removeObject: function(array, item) {
-    var index = this.indexOf(array, item);
+    var index = utils.indexOf(array, item);
     if (index !== -1) { array.splice(index, 1); }
   }
 };
@@ -652,7 +652,6 @@ Ember.meta = function meta(obj, writable) {
       descs: {},
       watching: {},
       values: {},
-      lastSetValues: {},
       cache:  {},
       source: obj
     });
@@ -665,7 +664,6 @@ Ember.meta = function meta(obj, writable) {
     ret.descs    = o_create(ret.descs);
     ret.values   = o_create(ret.values);
     ret.watching = o_create(ret.watching);
-    ret.lastSetValues = {};
     ret.cache    = {};
     ret.source   = obj;
 
@@ -846,6 +844,26 @@ Ember.makeArray = function(obj) {
 var guidFor = Ember.guidFor,
     indexOf = Ember.ArrayPolyfills.indexOf;
 
+var copy = function(obj) {
+  var output = {};
+
+  for (var prop in obj) {
+    if (obj.hasOwnProperty(prop)) { output[prop] = obj[prop]; }
+  }
+
+  return output;
+};
+
+var copyMap = function(original, newObject) {
+  var keys = original.keys.copy(),
+      values = copy(original.values);
+
+  newObject.keys = keys;
+  newObject.values = values;
+
+  return newObject;
+};
+
 // This class is used internally by Ember.js and Ember Data.
 // Please do not use it at this time. We plan to clean it up
 // and add many tests soon.
@@ -902,6 +920,15 @@ OrderedSet.prototype = {
 
   toArray: function() {
     return this.list.slice();
+  },
+
+  copy: function() {
+    var set = new OrderedSet();
+
+    set.presenceSet = copy(this.presenceSet);
+    set.list = this.list.slice();
+
+    return set;
   }
 };
 
@@ -1017,9 +1044,45 @@ Map.prototype = {
       var guid = guidFor(key);
       callback.call(self, key, values[guid]);
     });
+  },
+
+  copy: function() {
+    return copyMap(this, new Map());
   }
 };
 
+var MapWithDefault = Ember.MapWithDefault = function(options) {
+  Map.call(this);
+  this.defaultValue = options.defaultValue;
+};
+
+MapWithDefault.create = function(options) {
+  if (options) {
+    return new MapWithDefault(options);
+  } else {
+    return new Map();
+  }
+};
+
+MapWithDefault.prototype = Ember.create(Map.prototype);
+
+MapWithDefault.prototype.get = function(key) {
+  var hasValue = this.has(key);
+
+  if (hasValue) {
+    return Map.prototype.get.call(this, key);
+  } else {
+    var defaultValue = this.defaultValue(key);
+    this.set(key, defaultValue);
+    return defaultValue;
+  }
+};
+
+MapWithDefault.prototype.copy = function() {
+  return copyMap(this, new MapWithDefault({
+    defaultValue: this.defaultValue
+  }));
+};
 
 })();
 
@@ -1153,6 +1216,12 @@ Ember.get = get;
   @returns {Object} the passed value.
 */
 Ember.set = set;
+
+if (Ember.config.overrideAccessors) {
+  Ember.config.overrideAccessors();
+  get = Ember.get;
+  set = Ember.set;
+}
 
 // ..........................................................
 // PATHS
@@ -3192,6 +3261,8 @@ function deferEvent(obj, eventName) {
   });
 
   return function() {
+    if (obj.isDestroyed) { return; }
+
     if (obj !== Ember && 'function' === typeof obj.sendEvent) {
       obj.sendEvent.apply(obj, a_slice.call(params, 1));
     }
@@ -5803,9 +5874,11 @@ function xform(target, method, params) {
   libraries by implementing only methods that mostly correspond to the
   JavaScript 1.8 API.
 
+  @extends Ember.Mixin
   @since Ember 0.9
 */
-Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
+Ember.Enumerable = Ember.Mixin.create(
+  /** @scope Ember.Enumerable.prototype */ {
 
   /** @private - compatibility */
   isEnumerable: true,
@@ -5836,9 +5909,9 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     The default implementation of this method simply looks up the index.
     This works great on any Array-like objects.
 
-    @param index {Number} the current index of the iteration
-    @param previousObject {Object} the value returned by the last call to nextObject.
-    @param context {Object} a context object you can use to maintain state.
+    @param {Number} index the current index of the iteration
+    @param {Object} previousObject the value returned by the last call to nextObject.
+    @param {Object} context a context object you can use to maintain state.
     @returns {Object} the next object in the iteration or undefined
   */
   nextObject: Ember.required(Function),
@@ -5933,7 +6006,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     to give your iterator function access to the current object.
 
     @param {Function} callback The callback to execute
-    @param {Object} target The target object to use
+    @param {Object} [target] The target object to use
     @returns {Object} receiver
   */
   forEach: function(callback, target) {
@@ -5955,7 +6028,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
   /**
     Alias for mapProperty
 
-    @params key {String} name of the property
+    @param {String} key name of the property
     @returns {Array} The mapped array.
   */
   getEach: function(key) {
@@ -5998,7 +6071,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     to give your iterator function access to the current object.
 
     @param {Function} callback The callback to execute
-    @param {Object} target The target object to use
+    @param {Object} [target] The target object to use
     @returns {Array} The mapped array.
   */
   map: function(callback, target) {
@@ -6013,7 +6086,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     Similar to map, this specialized function returns the value of the named
     property on all items in the enumeration.
 
-    @params key {String} name of the property
+    @param {String} key name of the property
     @returns {Array} The mapped array.
   */
   mapProperty: function(key) {
@@ -6043,7 +6116,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     to give your iterator function access to the current object.
 
     @param {Function} callback The callback to execute
-    @param {Object} target The target object to use
+    @param {Object} [target] The target object to use
     @returns {Array} A filtered array.
   */
   filter: function(callback, target) {
@@ -6059,8 +6132,8 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     can pass an optional second argument with the target value.  Otherwise
     this will match any property that evaluates to true.
 
-    @params key {String} the property to test
-    @param value {String} optional value to test against.
+    @param {String} key the property to test
+    @param {String} [value] optional value to test against.
     @returns {Array} filtered array
   */
   filterProperty: function(key, value) {
@@ -6088,7 +6161,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     to give your iterator function access to the current object.
 
     @param {Function} callback The callback to execute
-    @param {Object} target The target object to use
+    @param {Object} [target] The target object to use
     @returns {Object} Found item or null.
   */
   find: function(callback, target) {
@@ -6114,8 +6187,8 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
 
     This method works much like the more generic find() method.
 
-    @params key {String} the property to test
-    @param value {String} optional value to test against.
+    @param {String} key the property to test
+    @param {String} [value] optional value to test against.
     @returns {Object} found item or null
   */
   findProperty: function(key, value) {
@@ -6146,7 +6219,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
           if (people.every(isEngineer)) { Paychecks.addBigBonus(); }
 
     @param {Function} callback The callback to execute
-    @param {Object} target The target object to use
+    @param {Object} [target] The target object to use
     @returns {Boolean}
   */
   every: function(callback, target) {
@@ -6159,8 +6232,8 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     Returns true if the passed property resolves to true for all items in the
     enumerable.  This method is often simpler/faster than using a callback.
 
-    @params key {String} the property to test
-    @param value {String} optional value to test against.
+    @param {String} key the property to test
+    @param {String} [value] optional value to test against.
     @returns {Array} filtered array
   */
   everyProperty: function(key, value) {
@@ -6192,7 +6265,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
           if (people.some(isManager)) { Paychecks.addBiggerBonus(); }
 
     @param {Function} callback The callback to execute
-    @param {Object} target The target object to use
+    @param {Object} [target] The target object to use
     @returns {Array} A filtered array.
   */
   some: function(callback, target) {
@@ -6205,8 +6278,8 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     Returns true if the passed property resolves to true for any item in the
     enumerable.  This method is often simpler/faster than using a callback.
 
-    @params key {String} the property to test
-    @param value {String} optional value to test against.
+    @param {String} key the property to test
+    @param {String} [value] optional value to test against.
     @returns {Boolean} true
   */
   someProperty: function(key, value) {
@@ -6260,8 +6333,8 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
     implements it.  This method corresponds to the implementation in
     Prototype 1.6.
 
-    @param methodName {String} the name of the method
-    @param args {Object...} optional arguments to pass as well.
+    @param {String} methodName the name of the method
+    @param {Object...} args optional arguments to pass as well.
     @returns {Array} return values from calling invoke.
   */
   invoke: function(methodName) {
@@ -6451,7 +6524,7 @@ Ember.Enumerable = Ember.Mixin.create( /** @lends Ember.Enumerable */ {
       An enumerable of the objects to be removed or the number of items to
       be removed.
 
-    @param {Ember.Enumerable|Numbe} adding
+    @param {Ember.Enumerable|Number} adding
       An enumerable of the objects to be added or the number of items to be
       added.
 
@@ -6817,6 +6890,9 @@ Ember.Array = Ember.Mixin.create(Ember.Enumerable, /** @scope Ember.Array.protot
       if (addAmt    === undefined) addAmt=-1;
     }
 
+    // Make sure the @each proxy is set up if anyone is observing @each
+    if (Ember.isWatching(this, '@each')) { get(this, '@each'); }
+
     Ember.sendEvent(this, '@array:before', startIdx, removeAmt, addAmt);
 
     var removing, lim;
@@ -6829,9 +6905,6 @@ Ember.Array = Ember.Mixin.create(Ember.Enumerable, /** @scope Ember.Array.protot
     }
 
     this.enumerableContentWillChange(removing, addAmt);
-
-    // Make sure the @each proxy is set up if anyone is observing @each
-    if (Ember.isWatching(this, '@each')) { get(this, '@each'); }
 
     return this;
   },
@@ -6910,6 +6983,7 @@ Ember.Array = Ember.Mixin.create(Ember.Enumerable, /** @scope Ember.Array.protot
 
   You should implement the compare() method.
 
+  @extends Ember.Mixin
   @since Ember 0.9
 */
 Ember.Comparable = Ember.Mixin.create( /** @scope Ember.Comparable.prototype */{
@@ -6967,6 +7041,7 @@ var get = Ember.get, set = Ember.set;
 
   Note that frozenCopy() will only work if you also implement Ember.Freezable.
 
+  @extends Ember.Mixin
   @since Ember 0.9
 */
 Ember.Copyable = Ember.Mixin.create(
@@ -7078,6 +7153,7 @@ var get = Ember.get, set = Ember.set;
   Ember.Copyable protocol, which defines a frozenCopy() method that will return
   a frozen object, if the object implements this method as well.
 
+  @extends Ember.Mixin
   @since Ember 0.9
 */
 Ember.Freezable = Ember.Mixin.create(
@@ -7767,6 +7843,10 @@ Ember.Observable = Ember.Mixin.create(/** @scope Ember.Observable.prototype */ {
     return this;
   },
 
+  addBeforeObserver: function(key, target, method) {
+    Ember.addBeforeObserver(this, key, target, method);
+  },
+
   /**
     Adds an observer on a property.
 
@@ -8041,7 +8121,13 @@ function xform(target, method, params) {
   method.apply(target, args);
 }
 
-Ember.Evented = Ember.Mixin.create({
+/**
+ @class
+
+ @extends Ember.Mixin
+ */
+Ember.Evented = Ember.Mixin.create(
+  /** @scope Ember.Evented.prototype */ {
   on: function(name, target, method) {
     if (!method) {
       method = target;
@@ -8051,8 +8137,32 @@ Ember.Evented = Ember.Mixin.create({
     Ember.addListener(this, name, target, method, xform);
   },
 
+  one: function(name, target, method) {
+    if (!method) {
+      method = target;
+      target = null;
+    }
+
+    var wrapped = function() {
+      Ember.removeListener(this, name, target, wrapped);
+
+      // Internally, a `null` target means that the target is
+      // the first parameter to addListener. That means that
+      // the `this` passed into this function is the target
+      // determined by the event system.
+      method.apply(this, arguments);
+    };
+
+    this.on(name, target, wrapped);
+  },
+
+  trigger: function(name) {
+   Ember.sendEvent.apply(null, [this, name].concat(a_slice.call(arguments, 1)));
+  },
+
   fire: function(name) {
-    Ember.sendEvent.apply(null, [this, name].concat(a_slice.call(arguments, 1)));
+
+    this.trigger.apply(this, arguments);
   },
 
   off: function(name, target, method) {
@@ -8233,10 +8343,14 @@ CoreObject.PrototypeMixin = Ember.Mixin.create(
   }
 });
 
+if (Ember.config.overridePrototypeMixin) {
+  Ember.config.overridePrototypeMixin(CoreObject.PrototypeMixin);
+}
+
 CoreObject.__super__ = null;
 
 var ClassMixin = Ember.Mixin.create(
-/** @scope Ember.CoreObject */ {
+/** @scope Ember.ClassMixin.prototype */ {
 
   ClassMixin: Ember.required(),
 
@@ -8348,6 +8462,10 @@ var ClassMixin = Ember.Mixin.create(
   }
 
 });
+
+if (Ember.config.overrideClassMixin) {
+  Ember.config.overrideClassMixin(ClassMixin);
+}
 
 CoreObject.ClassMixin = ClassMixin;
 ClassMixin.apply(CoreObject);
@@ -9196,8 +9314,8 @@ delegateDesc = Ember.computed(delegate).volatile();
 /**
   @class
 
-  `Ember.ObjectProxy` forwards all properties to a proxied `content`
-  object.
+  `Ember.ObjectProxy` forwards all properties not defined by the proxy itself
+  to a proxied `content` object.
 
       object = Ember.Object.create({
         name: 'Foo'
@@ -9215,13 +9333,37 @@ delegateDesc = Ember.computed(delegate).volatile();
       proxy.set('description', 'Foo is a whizboo baz');
       object.get('description') // => 'Foo is a whizboo baz'
 
-  While `content` is unset, new properties will be silently discarded.
+  While `content` is unset, setting a property to be delegated will throw an Error.
 
       proxy = Ember.ObjectProxy.create({
-        content: null
+        content: null,
+        flag: null
       });
-      proxy.set('blackHole', 'data');
-      proxy.get('blackHole') // => undefined
+      proxy.set('flag', true);
+      proxy.get('flag'); // => true
+      proxy.get('foo'); // => undefined
+      proxy.set('foo', 'data'); // throws Error
+
+  Delegated properties can be bound to and will change when content is updated.
+
+  Computed properties on the proxy itself can depend on delegated properties.
+
+      ProxyWithComputedProperty = Ember.ObjectProxy.extend({
+        fullName: function () {
+          var firstName = this.get('firstName'),
+              lastName = this.get('lastName');
+          if (firstName && lastName) {
+            return firstName + ' ' + lastName;
+          }
+          return firstName || lastName;
+        }.property('firstName', 'lastName')
+      });
+      proxy = ProxyWithComputedProperty.create();
+      proxy.get('fullName'); => undefined
+      proxy.set('content', {
+        firstName: 'Tom', lastName: 'Dale'
+      }); // triggers property change for fullName on proxy
+      proxy.get('fullName'); => 'Tom Dale'
 */
 Ember.ObjectProxy = Ember.Object.extend(
 /** @scope Ember.ObjectProxy.prototype */ {
@@ -9242,9 +9384,10 @@ Ember.ObjectProxy = Ember.Object.extend(
   /** @private */
   delegateSet: function (key, value) {
     var content = get(this, 'content');
-    if (content) {
-      return set(content, key, value);
+    if (!content) {
+      throw new Error('Unable to delegate set without content for property: ' + key);
     }
+    return set(content, key, value);
   },
   /** @private */
   willWatchProperty: function (key) {
@@ -9679,7 +9822,8 @@ Ember.ControllerMixin = Ember.Mixin.create({
     By default, a controller's `target` is set to the router after it is
     instantiated by `Ember.Application#initialize`.
   */
-  target: null
+  target: null,
+  store: null
 });
 
 Ember.Controller = Ember.Object.extend(Ember.ControllerMixin);
@@ -9691,7 +9835,14 @@ Ember.Controller = Ember.Object.extend(Ember.ControllerMixin);
 (function() {
 var get = Ember.get, set = Ember.set, forEach = Ember.EnumerableUtils.forEach;
 
-Ember.SortableMixin = Ember.Mixin.create(Ember.MutableEnumerable, {
+/**
+ @class
+
+ @extends Ember.Mixin
+ @extends Ember.MutableEnumerable
+*/
+Ember.SortableMixin = Ember.Mixin.create(Ember.MutableEnumerable,
+  /** @scope Ember.Observable.prototype */ {
   sortProperties: null,
   sortAscending: true,
 
@@ -9881,6 +10032,8 @@ Ember.SortableMixin = Ember.Mixin.create(Ember.MutableEnumerable, {
 // Copyright: ©2011 Strobe Inc. and contributors.
 // License:   Licensed under MIT license (see license.js)
 // ==========================================================================
+var get = Ember.get, set = Ember.set;
+
 /**
   @class
 
@@ -9919,8 +10072,6 @@ Ember.SortableMixin = Ember.Mixin.create(Ember.MutableEnumerable, {
 
   @extends Ember.ArrayProxy
 */
-
-var get = Ember.get, set = Ember.set;
 
 Ember.ArrayController = Ember.ArrayProxy.extend(Ember.ControllerMixin,
   Ember.SortableMixin);
